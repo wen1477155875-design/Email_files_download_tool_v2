@@ -1,0 +1,97 @@
+# ==========================================================
+# 邮件附件自动下载工具 - 配置文件
+# 修改后无需重装计划任务，下次运行自动生效
+# ==========================================================
+
+outlook:
+  # 邮箱名（Outlook 左侧文件夹列表里显示的那个名字）
+  # 留空 = 使用 Outlook 默认邮箱；配了多个账号就填显示名，例如 "张三 - 公司"
+  mailbox: "harvey.wen@outlook.com"
+  # 要扫描的文件夹，用 / 分隔层级
+  # 例："收件箱"  "收件箱/客户报表"  "Inbox"
+  folder: "收件箱"
+  # 只处理标准邮件（跳过会议邀请、已读回执等）
+  only_mail_items: true
+  # 连接 Outlook 的超时秒数。超时就放弃本次运行，避免计划任务被永久挂住
+  timeout_seconds: 120
+
+# 关注的发件人。支持精确地址，或 *@域名 做域名通配
+senders:
+  - "12024213083@stu.ynu.edu.cn"
+
+scan:
+  # 只处理"收件日期 == 今天"的邮件（按本机时区算）。
+  # true  = 每天只抓当天的，昨天及更早的一律跳过（不看 lookback_days）
+  # false = 抓最近 lookback_days 天的
+  # 命令行可临时覆盖：--only-today / --no-only-today
+  only_today: true
+  # 每次运行回溯多少天（配合状态文件去重，实际只会下载没下过的）
+  # 注意：only_today=true 时本项不再生效
+  lookback_days: 7
+  # 单次运行最多检查多少封邮件，防止超大文件夹卡死
+  max_messages_per_run: 500
+
+download:
+  # 附件保存根目录。
+  # 注意：YAML 里 \ 是转义符，Windows 路径建议用正斜杠 / 写
+  target_dir: "D:/Email files download tool/downloads"
+  # 子目录模板，可用变量：
+  #   {sender} {sender_local} {sender_domain} {date} {year} {month} {day} {subject}
+  subfolder_template: "{sender}/{date}"
+  # 跳过内嵌图片（签名档 logo、正文插图等），强烈建议保持 true
+  skip_inline_images: true
+  # 是否把"邮件内嵌的邮件对象"另存为 .msg
+  save_embedded_msg: false
+  # 同名文件处理：rename（自动加 _1 _2）/ overwrite（直接覆盖）/ skip
+  on_duplicate: overwrite
+  min_size_bytes: 0
+  max_size_bytes: 104857600
+  # 扩展名白名单，留空 = 不限制。例：["xlsx", "xls", "pdf", "zip"]
+  allowed_extensions: []
+
+# ----------------------------------------------------------
+# 解压：把下载好的压缩包解压到另一个目录
+# ----------------------------------------------------------
+extract:
+  # 是否启用解压
+  enabled: true
+  # 解压根目录（跟上面的下载目录分开，互不干扰）
+  target_dir: "D:/Email files download tool/extracted"
+  # 子目录模板，比下载目录多一个变量：
+  #   {archive} = 压缩包文件名（不含扩展名）
+  #   其余同下载：{sender} {date} {year} {month} {day} {subject}
+  # 留空 = 解出来的文件直接放在解压根目录（zip 里的 pdf 就直接出现在该目录下）
+  subfolder_template: ""
+  # 只解压这些扩展名，小写
+  extensions: [zip]
+  # 同名文件处理：rename（自动加 _1 _2）/ overwrite（直接覆盖）/ skip
+  on_duplicate: overwrite
+  # 解压成功后删除原压缩包（省空间，但不可恢复，建议先跑熟了再开）
+  delete_archive: false
+  # 邮件正文里若有 "Report Job Description：xxxx"，且 zip 只解出一份文档，
+  # 就把该文档重命名为 xxxx（保留原扩展名）
+  rename_by_job_desc: true
+  # 安全阀：单个包最多解出多少文件 / 总体积上限 / 压缩比上限（防 zip bomb）
+  max_files: 2000
+  max_total_bytes: 2147483648
+  max_ratio: 200
+
+state:
+  # 已处理记录（增量去重的依据，删掉它会导致重新下载）
+  file: "data/state.json"
+  # 记录保留天数，超过后自动清理
+  retention_days: 180
+
+logging:
+  dir: "data/logs"
+  level: INFO
+
+schedule:
+  task_name: "EmailAttachmentDownloader"
+  # daily = 每天固定时间；minutes = 每隔 N 分钟
+  mode: daily
+  time: "10:00"
+  interval_minutes: 30
+  # 错过触发时间（例如当时关机）后是否补跑
+  start_when_available: true
+  execution_time_limit: PT1H
