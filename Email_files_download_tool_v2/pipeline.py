@@ -89,13 +89,56 @@ def _desc_target(src: Path, desc: str, on_duplicate: str) -> Optional[Path]:
     return unique_path(clamp_path_length(src.parent / stem), on_duplicate)
 
 
-def _rename_by_job_desc(paths, desc: str, on_duplicate: str, logger) -> None:
+def _file_hash(path: Path, chunk: int = 1024 * 1024) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while True:
+            block = fh.read(chunk)
+            if not block:
+                break
+            h.update(block)
+    return h.hexdigest()
+
+
+def _same_content(a: Path, b: Path) -> bool:
+    try:
+        if a.stat().st_size != b.stat().st_size:
+            return False
+        return _file_hash(a) == _file_hash(b)
+    except OSError:
+        return False
+
+
+def _safe_desc_target(src: Path, desc: str, logger) -> Optional[Path]:
+    """按描述生成目标路径，并处理撞名。
+
+    规则：目标同名时，**内容相同才覆盖**（重复下载的同一份报告，不会出现 bbbb_1），
+    **内容不同则保留两份并加序号**（不同报告撞名，绝不静默丢文件）。
+    """
+    base = _desc_target(src, desc, "overwrite")
+    if base is None or base == src or not base.exists():
+        return base
+    if _same_content(src, base):
+        logger.info("目标同名且内容一致，覆盖：%s", base.name)
+        return base
+    for n in range(1, 1000):
+        candidate = base.with_name(f"{base.stem}_{n}{base.suffix}")
+        if not candidate.exists():
+            logger.warning("目标同名但内容不同，保留两份：%s（另存为 %s）",
+                           base.name, candidate.name)
+            return candidate
+        if _same_content(src, candidate):
+            return candidate
+    return base
+
+
+def _rename_by_job_desc(paths, desc: str, logger) -> None:
     """zip 只解出一个文件时，把文件重命名为正文里的 Report Job Description。"""
     if len(paths) != 1:
         logger.info("解压出 %d 个文件（非单个），跳过按正文重命名", len(paths))
         return
     src = Path(paths[0])
-    target = _desc_target(src, desc, on_duplicate)
+    target = _safe_desc_target(src, desc, logger)
     if target is None:
         logger.info("跳过重命名（目标同名文件已存在）：%s", src.name)
         return
@@ -145,7 +188,7 @@ def run_once(
             y, m, d = (int(x) for x in str(specific_date).split("-"))
         except ValueError as exc:
             raise ValueError(f"指定日期格式应为 YYYY-MM-DD，当前是 {specific_date!r}") from exc
-        cutoff, until = local_date_window_utc(y, m, d)
+        cutoff, until = local_date_window_utc(y, m, d, cfg.scan.day_start_hour)
         window_desc = (
             f"指定日期 {specific_date}（本地时间 "
             f"{utc_to_local_naive(cutoff):%Y-%m-%d %H:%M:%S} ~ {utc_to_local_naive(until):%Y-%m-%d %H:%M:%S}）"
@@ -153,7 +196,7 @@ def run_once(
     elif today_only:
         # 取两个下界里更晚的那个：既满足"只看今天"，也不会因为 lookback_days
         # 配得很大而把今天之前的邮件又扫进来。
-        today_start, today_end = today_window_utc()
+        today_start, today_end = today_window_utc(cfg.scan.day_start_hour)
         cutoff = max(cutoff, today_start)
         until = today_end
         window_desc = (
@@ -285,11 +328,8 @@ def run_once(
                             stats["extract_files"] += int(outcome["files"])
                             logger.info("已解压 %s 个文件 -> %s", outcome["files"], dest_dir)
                             if desc:
-                                # 按正文命名是"精确指定名字"，同名一律覆盖：
-                                # 若走 rename 模式会得到 bbbb_1 这种无效命名。
                                 _rename_by_job_desc(
-                                    outcome.get("paths") or [], desc,
-                                    "overwrite", logger,
+                                    outcome.get("paths") or [], desc, logger,
                                 )
                             if cfg.extract.delete_archive:
                                 try:
@@ -304,7 +344,7 @@ def run_once(
                     # 压缩包本身也按同一规则重命名（如 bbbb.csv -> bbbb.zip），
                     # 并同步更新记账路径，避免下次运行被判"文件丢失"而重复下载。
                     if desc and final_path.exists():
-                        arc_target = _desc_target(final_path, desc, "overwrite")
+                        arc_target = _safe_desc_target(final_path, desc, logger)
                         if arc_target is not None and arc_target != final_path:
                             try:
                                 final_path.replace(arc_target)

@@ -59,32 +59,41 @@ def to_utc_naive(dt: Optional[datetime]) -> Optional[datetime]:
     return dt.astimezone(timezone.utc).replace(tzinfo=None)
 
 
-def local_midnight_utc(offset_days: int = 0) -> datetime:
-    """本地时区第 offset_days 天的 00:00:00，换算成 naive UTC。
+def local_day_start_utc(offset_days: int = 0, start_hour: int = 0) -> datetime:
+    """本地时区第 offset_days 天的 start_hour:00:00，换算成 naive UTC。
 
-    offset_days=0 -> 今天零点；1 -> 明天零点。
-    用于实现"只处理当天邮件"：必须按本地日期算，直接用 UTC 会把
-    东八区当天 00:00~08:00 的邮件算成前一天。
+    offset_days=0 -> 今天；1 -> 明天。start_hour 允许把"一天"的起点
+    从 00:00 挪到别处（例如 8 表示 08:00 ~ 次日 08:00 算一天）。
+
+    必须按本地日期算，直接用 UTC 会把东八区当天 00:00~08:00 的邮件算成前一天。
     """
     now_local = datetime.now().astimezone()
     midnight = (now_local + timedelta(days=offset_days)).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
-    return midnight.astimezone(timezone.utc).replace(tzinfo=None)
+    return (midnight + timedelta(hours=start_hour)).astimezone(timezone.utc).replace(tzinfo=None)
 
 
-def today_window_utc():
-    """返回 (本地今天 00:00 UTC, 本地今天 23:59:59 UTC)。
+def local_midnight_utc(offset_days: int = 0) -> datetime:
+    """本地时区第 offset_days 天的 00:00:00，换算成 naive UTC（保留兼容）。"""
+    return local_day_start_utc(offset_days, 0)
 
-    上界取当天 23:59:59（而不是次日零点），与用户看到的
-    "仅今天 = 当天 00:00 ~ 23:59" 的直观理解保持一致。
+
+def today_window_utc(start_hour: int = 0):
+    """返回 (本地今天 start_hour:00 UTC, 到次日同一时刻前 1 秒 UTC)。
+
+    默认 start_hour=0 即 00:00:00 ~ 23:59:59，与直观的"仅今天"一致；
+    配成 8 则变成 08:00:00 ~ 次日 07:59:59。
     """
-    return local_midnight_utc(0), local_midnight_utc(1) - timedelta(seconds=1)
+    return (
+        local_day_start_utc(0, start_hour),
+        local_day_start_utc(1, start_hour) - timedelta(seconds=1),
+    )
 
 
-def local_date_window_utc(year: int, month: int, day: int):
-    """指定本地日期的 (当天 00:00 UTC, 当天 23:59:59 UTC)，用于"补抓某一天"的邮件。"""
-    start_local = datetime(year, month, day)
+def local_date_window_utc(year: int, month: int, day: int, start_hour: int = 0):
+    """指定本地日期的 (起点 UTC, 终点 UTC)，用于"补抓某一天"的邮件。"""
+    start_local = datetime(year, month, day) + timedelta(hours=start_hour)
     start_utc = start_local.astimezone(timezone.utc).replace(tzinfo=None)
     end_utc = (start_local + timedelta(days=1) - timedelta(seconds=1)) \
         .astimezone(timezone.utc).replace(tzinfo=None)

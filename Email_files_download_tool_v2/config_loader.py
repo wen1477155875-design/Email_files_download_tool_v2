@@ -32,6 +32,9 @@ class ScanSection:
     max_messages_per_run: int = 500
     # 只处理"本地日期 == 今天"的邮件（收件当天就下载，错过就不管）
     only_today: bool = False
+    # 一天的起点小时（0=00:00~23:59；8=08:00~次日07:59）
+    # 仅用于补偿 Outlook ReceivedTime 的时区问题，正常情况下保持 0
+    day_start_hour: int = 0
 
 
 @dataclass
@@ -152,6 +155,7 @@ def load_config(path: Path) -> Config:
             lookback_days=int(scan_raw.get("lookback_days", 7)),
             max_messages_per_run=int(scan_raw.get("max_messages_per_run", 500)),
             only_today=bool(scan_raw.get("only_today", False)),
+            day_start_hour=max(0, min(23, int(scan_raw.get("day_start_hour", 0)))),
         ),
         download=DownloadSection(
             target_dir=_resolve(base, dl_raw.get("target_dir", "downloads")),

@@ -10,11 +10,14 @@ import os
 import re
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, List, Optional
 
 from utils import sender_matches, to_utc_naive
+
+# PR_MESSAGE_DELIVERY_TIME：邮件投递时间，MAPI 里以 FILETIME 存的真 UTC 值
+PR_MESSAGE_DELIVERY_TIME = "http://schemas.microsoft.com/mapi/proptag/0x0E060040"
 
 _IMPORT_ERROR: Optional[BaseException] = None
 try:
@@ -72,6 +75,33 @@ def _prop(target, tag: str):
         return target.PropertyAccessor.GetProperty(tag)
     except Exception:
         return None
+
+
+def received_time_utc(item) -> Optional[datetime]:
+    """取邮件的接收时间（naive UTC）。
+
+    ⚠️ 不能直接用 item.ReceivedTime.astimezone(UTC)：pywin32 给它挂的 tzinfo 是
+    名义上的 UTC（本机实测为 "GMT Standard Time"，偏移 0），但**数值其实是本地时间**。
+    在 UTC+8 上这会让所有邮件被当成"晚了 8 小时到达"，
+    于是当天 00:00~08:00 之外的昨天邮件会被误判成今天（实测：9.8 16:00 之后的邮件
+    全部被算进 9.9）。
+
+    因此这里优先读 MAPI 的 PR_MESSAGE_DELIVERY_TIME（FILETIME，真 UTC）；
+    读不到时退回把 ReceivedTime 的**数值当本地时间**再换算成 UTC。
+    """
+    value = _prop(item, PR_MESSAGE_DELIVERY_TIME)
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc).astimezone(timezone.utc).replace(tzinfo=None)
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+    try:
+        raw = item.ReceivedTime
+    except Exception:
+        return None
+    naive = raw.replace(tzinfo=None)
+    # naive.astimezone 会把朴素时间按"本机本地时间"解释，正是我们想要的
+    return naive.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 _PROBE_CODE = r"""
@@ -366,7 +396,7 @@ class OutlookSession:
                 continue
 
             try:
-                received = to_utc_naive(item.ReceivedTime)
+                received = received_time_utc(item)
             except Exception:
                 continue
             if received is None:

@@ -242,18 +242,34 @@ schedule:
             def error(self, *a, **k): pass
 
         dup_dir = Path(tempfile.mkdtemp(prefix="maildl_dup_"))
-        dup_zip = dup_dir / "pack.zip"
-        with zipfile.ZipFile(dup_zip, "w") as zf:
-            zf.writestr("原件.pdf", b"x")
         out_dir = dup_dir / "out"
-        dup_names = []
-        for _ in range(2):
-            r = extract_archive(dup_zip, out_dir)
-            pipeline._rename_by_job_desc(r.get("paths") or [], "bbbb.csv",
-                                         "overwrite", _NullLogger())
-            dup_names = sorted(p.name for p in out_dir.rglob("*"))
+
+        def _pass(content: bytes) -> list:
+            """模拟一次"下载 zip -> 解压 -> 按正文命名"，返回目录里的文件名。"""
+            zp = dup_dir / "pack.zip"
+            with zipfile.ZipFile(zp, "w") as zf:
+                zf.writestr("原件.pdf", content)
+            r = extract_archive(zp, out_dir)
+            pipeline._rename_by_job_desc(r.get("paths") or [], "bbbb.csv", _NullLogger())
+            return sorted(p.name for p in out_dir.rglob("*"))
+
+        dup_names = _pass(b"x")           # 第一次
+        dup_names = _pass(b"x")           # 第二次：内容相同 -> 覆盖，不留 bbbb_1
         dup_ok = dup_names == ["bbbb.pdf"]
-        print("  两次解压+命名后:", dup_names)
+
+        out_dir2 = dup_dir / "out2"       # 内容不同的同名报告 -> 必须保留两份
+        def _pass2(content: bytes) -> list:
+            zp = dup_dir / "pack2.zip"
+            with zipfile.ZipFile(zp, "w") as zf:
+                zf.writestr("原件.pdf", content)
+            r = extract_archive(zp, out_dir2)
+            pipeline._rename_by_job_desc(r.get("paths") or [], "bbbb.csv", _NullLogger())
+            return sorted(p.name for p in out_dir2.rglob("*"))
+
+        diff_names = _pass2(b"AAA")
+        diff_names = _pass2(b"BBB")
+        diff_ok = diff_names == ["bbbb.pdf", "bbbb_1.pdf"]
+        print("  相同内容两次:", dup_names, "| 不同内容两次:", diff_names)
 
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -276,6 +292,7 @@ schedule:
         ("压缩包已按同一规则重命名（单文件.zip -> AOS数据报告2026.zip）", archive_renamed),
         ("压缩包原文件名不再存在", not archive_original_left),
         ("重复解压同一 zip 命名不退化成 bbbb_1", dup_ok),
+        ("内容不同的同名报告保留两份，不静默覆盖", diff_ok),
     ]
 
     print("\n=== 断言结果 ===")
