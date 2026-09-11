@@ -15,6 +15,8 @@ from state_store import RunLock, StateStore
 from utils import (
     clamp_path_length,
     now_utc_naive,
+    resolve_collision,
+    same_content,
     sanitize_component,
     sanitize_filename,
     sender_matches,
@@ -73,40 +75,26 @@ def job_description(body: str) -> str:
     return match.group(1).strip() if match else ""
 
 
-def _desc_target(src: Path, desc: str, on_duplicate: str) -> Optional[Path]:
-    """按正文描述生成重命名目标路径（压缩包与解压文件共用同一规则）。
+def _desc_stem(desc: str) -> str:
+    """最终文件名主干（不含扩展名）。
 
-    描述自带扩展名（如 bbbb.csv）时剥离掉，统一用原文件的扩展名；
-    扩展名必须以字母开头（避免把 "报告 v1.2" 的 ".2" 误当扩展名）。
+    描述里自带扩展名（如 bbbb.csv）时剥离掉——真正的扩展名由解压出的文件决定，
+    否则会出现 bbbb.csv.pdf 这种名字。
     """
     stem = sanitize_filename(desc)
     m = re.search(r"\.[A-Za-z][A-Za-z0-9]{0,5}$", stem)
-    if m and m.group(0).lower() != src.suffix.lower():
+    if m:
         stem = stem[: m.start()]
+    return stem or "unnamed"
+
+
+def _desc_target(src: Path, desc: str, on_duplicate: str) -> Optional[Path]:
+    """按正文描述生成重命名目标路径（压缩包与解压文件共用同一规则）。"""
+    stem = _desc_stem(desc)
     suffix = src.suffix
     if not stem.lower().endswith(suffix.lower()):
         stem += suffix
     return unique_path(clamp_path_length(src.parent / stem), on_duplicate)
-
-
-def _file_hash(path: Path, chunk: int = 1024 * 1024) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as fh:
-        while True:
-            block = fh.read(chunk)
-            if not block:
-                break
-            h.update(block)
-    return h.hexdigest()
-
-
-def _same_content(a: Path, b: Path) -> bool:
-    try:
-        if a.stat().st_size != b.stat().st_size:
-            return False
-        return _file_hash(a) == _file_hash(b)
-    except OSError:
-        return False
 
 
 def _safe_desc_target(src: Path, desc: str, logger) -> Optional[Path]:
@@ -118,18 +106,13 @@ def _safe_desc_target(src: Path, desc: str, logger) -> Optional[Path]:
     base = _desc_target(src, desc, "overwrite")
     if base is None or base == src or not base.exists():
         return base
-    if _same_content(src, base):
+    final = resolve_collision(base, src)
+    if final == base:
         logger.info("目标同名且内容一致，覆盖：%s", base.name)
-        return base
-    for n in range(1, 1000):
-        candidate = base.with_name(f"{base.stem}_{n}{base.suffix}")
-        if not candidate.exists():
-            logger.warning("目标同名但内容不同，保留两份：%s（另存为 %s）",
-                           base.name, candidate.name)
-            return candidate
-        if _same_content(src, candidate):
-            return candidate
-    return base
+    else:
+        logger.warning("目标同名但内容不同，保留两份：%s（另存为 %s）",
+                       base.name, final.name)
+    return final
 
 
 def _rename_by_job_desc(paths, desc: str, logger) -> None:
@@ -322,6 +305,10 @@ def run_once(
                             max_files=cfg.extract.max_files,
                             max_total_bytes=cfg.extract.max_total_bytes,
                             max_ratio=cfg.extract.max_ratio,
+                            # 提前把最终名交给解压层：写盘时就按这个名字落，
+                            # 避免"先按 zip 内原名覆盖掉上一份、事后才发现撞名"导致丢文件
+                            final_stem=_desc_stem(desc) if desc else None,
+                            logger=logger,
                         )
                         if outcome["ok"]:
                             stats["extracted"] += 1

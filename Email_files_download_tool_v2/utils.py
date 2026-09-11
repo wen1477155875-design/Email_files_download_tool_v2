@@ -165,6 +165,47 @@ def unique_path(path: Path, mode: str = "overwrite") -> Optional[Path]:
     return path.parent / f"{stem}_{os.getpid()}{suffix}"
 
 
+def file_hash(path: Path, chunk: int = 1024 * 1024) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while True:
+            block = fh.read(chunk)
+            if not block:
+                break
+            h.update(block)
+    return h.hexdigest()
+
+
+def same_content(a: Path, b: Path) -> bool:
+    """内容是否完全相同（先比大小，再比 sha256）。"""
+    try:
+        if a.stat().st_size != b.stat().st_size:
+            return False
+        return file_hash(a) == file_hash(b)
+    except OSError:
+        return False
+
+
+def resolve_collision(target: Path, incoming: Path) -> Path:
+    """决定 incoming 应落到哪个名字。
+
+    目标不存在        -> 直接用目标名
+    内容相同          -> 覆盖目标名（重复下载的同一份报告，不应产生 aaaa_1）
+    内容不同          -> 另存为 名字_N（不同报告撞名，绝不静默丢文件）
+    """
+    if not target.exists():
+        return target
+    if same_content(incoming, target):
+        return target
+    stem, suffix = target.stem, target.suffix
+    for n in range(1, 1000):
+        candidate = target.with_name(f"{stem}_{n}{suffix}")
+        if not candidate.exists() or same_content(incoming, candidate):
+            return candidate
+    return target.with_name(f"{stem}_{os.getpid()}{suffix}")
+
+
 def normalize_addr(addr: str) -> str:
     return str(addr or "").strip().lower()
 

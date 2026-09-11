@@ -16,6 +16,7 @@ from typing import Dict, Optional
 
 from utils import (
     clamp_path_length,
+    resolve_collision,
     sanitize_component,
     sanitize_filename,
     unique_path,
@@ -105,8 +106,15 @@ def extract_archive(
     max_files: int = 2000,
     max_total_bytes: int = 2 * 1024 * 1024 * 1024,
     max_ratio: float = 200.0,
+    final_stem: Optional[str] = None,
+    logger=None,
 ) -> Dict[str, object]:
     """解压一个 zip。返回结果字典，不抛异常（失败用 ok=False 表达）。
+
+    final_stem：只含主干的最终文件名（如 "aaaa"，不含扩展名）。
+      仅当 zip 里只有一个文件且传入了它时生效：解出的文件直接按这个名字写出，
+      扩展名沿用 zip 内原文件的。撞名时先比对内容——相同则覆盖，不同则另存为 名字_N。
+      这样避免了"先按原文件名覆盖掉上一份结果、事后才发现撞名"导致的丢文件。
 
     返回：{"ok": bool, "files": int, "bytes": int, "paths": [写出的文件路径], "message": str}
     失败时会清理本次已写出的文件与目录。
@@ -147,40 +155,72 @@ def extract_archive(
             if len({s[0] for s in splits}) == 1 and all(len(s) == 2 for s in splits):
                 names = [s[1] for s in splits]
 
+            use_final = bool(final_stem) and len(members) == 1
+
             total = 0
-            for info, name in zip(members, names):
-                if max_ratio and info.compress_size > 0:
-                    ratio = info.file_size / info.compress_size
-                    if ratio > max_ratio:
-                        result["message"] = (
-                            f"压缩比异常（{ratio:.0f}:1），疑似 zip bomb，已中止：{name}"
-                        )
-                        return result
-
-                dest = _safe_dest(dest_root, name)
-                if dest is None:
-                    result["message"] = f"成员名越界，已中止（疑似 zip slip）：{info.filename!r}"
-                    return result
-
-                dest = clamp_path_length(dest.parent / sanitize_filename(dest.name))
-                final = unique_path(dest, overwrite)
-                if final is None:
-                    continue
-
-                final.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(info) as src, open(final, "wb") as out:
-                    while True:
-                        chunk = src.read(CHUNK)
-                        if not chunk:
-                            break
-                        total += len(chunk)
-                        if max_total_bytes and total > max_total_bytes:
+            tmp_paths: list[Path] = []
+            try:
+                for idx, (info, name) in enumerate(zip(members, names)):
+                    if max_ratio and info.compress_size > 0:
+                        ratio = info.file_size / info.compress_size
+                        if ratio > max_ratio:
                             result["message"] = (
-                                f"解压后大小超过上限 {max_total_bytes / 1024 / 1024:.0f} MB，已中止"
+                                f"压缩比异常（{ratio:.0f}:1），疑似 zip bomb，已中止：{name}"
                             )
                             return result
-                        out.write(chunk)
-                written.append(final)
+
+                    tmp = None
+                    if use_final:
+                        suffix = Path(sanitize_filename(Path(name).name)).suffix
+                        target = _safe_dest(dest_root, sanitize_filename(final_stem) + suffix)
+                        if target is None:
+                            result["message"] = f"目标名非法，已中止：{final_stem!r}"
+                            return result
+                        target = clamp_path_length(target)
+                        tmp = dest_root / f".~tmp_{os.getpid()}_{idx}"
+                        tmp_paths.append(tmp)
+                    else:
+                        dest = _safe_dest(dest_root, name)
+                        if dest is None:
+                            result["message"] = f"成员名越界，已中止（疑似 zip slip）：{info.filename!r}"
+                            return result
+                        dest = clamp_path_length(dest.parent / sanitize_filename(dest.name))
+                        target = unique_path(dest, overwrite)
+                        if target is None:
+                            continue
+
+                    out_path = tmp if tmp is not None else target
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(info) as src, open(out_path, "wb") as out:
+                        while True:
+                            chunk = src.read(CHUNK)
+                            if not chunk:
+                                break
+                            total += len(chunk)
+                            if max_total_bytes and total > max_total_bytes:
+                                result["message"] = (
+                                    f"解压后大小超过上限 {max_total_bytes / 1024 / 1024:.0f} MB，已中止"
+                                )
+                                return result
+                            out.write(chunk)
+
+                    if tmp is not None:
+                        # 先比内容再定名：同名且内容相同 -> 覆盖；内容不同 -> 另存，绝不丢文件
+                        final = resolve_collision(target, tmp)
+                        if final != target and logger is not None:
+                            logger.warning("目标同名但内容不同，保留两份：%s（另存为 %s）",
+                                           target.name, final.name)
+                        tmp.replace(final)
+                        tmp_paths.remove(tmp)
+                    else:
+                        final = target
+                    written.append(final)
+            finally:
+                for leftover in tmp_paths:
+                    try:
+                        leftover.unlink()
+                    except Exception:
+                        pass
 
         result.update(ok=True, files=len(written), bytes=total,
                       paths=[str(p) for p in written],
